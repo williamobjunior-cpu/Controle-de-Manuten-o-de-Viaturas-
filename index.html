@@ -1032,6 +1032,24 @@
     };
 
     const $ = (id) => document.getElementById(id);
+
+    function withTimeout(promise, ms, label = "operação"){
+      return Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`Tempo excedido ao carregar ${label}`)), ms))
+      ]);
+    }
+
+    function showRecoveryMode(msg){
+      state.loading = false;
+      renderAll();
+      showScreen("coverScreen");
+      const coverSubtitle = $("coverSubtitle");
+      if(coverSubtitle){
+        coverSubtitle.textContent = msg || "Modo de recuperação ativo. Revise as regras do Firestore e tente novamente.";
+      }
+      toast("Modo de recuperação ativado");
+    }
     function on(id, event, fn){
       const el = $(id);
       if(el) el.addEventListener(event, fn);
@@ -2024,27 +2042,37 @@ function renderPainel(){
     }
 
     async function ensureInitialData(){
-      const cfg = await getDoc(CONFIG_DOC);
-      if(!cfg.exists()){
-        await setDoc(CONFIG_DOC, state.config);
-      } else {
-        state.config = { ...state.config, ...cfg.data() };
+      try{
+        const cfg = await withTimeout(getDoc(CONFIG_DOC), 12000, "configurações");
+        if(!cfg.exists()){
+          await withTimeout(setDoc(CONFIG_DOC, state.config), 12000, "configuração inicial");
+        } else {
+          state.config = { ...state.config, ...cfg.data() };
+        }
+      } catch(err){
+        console.warn("Falha ao carregar cv_config:", err);
+        throw err;
       }
 
-      const usersSnap = await getDocs(USERS_COL);
-      if(usersSnap.empty){
-        await addDoc(USERS_COL, {
-          nome: "Administrador",
-          rg: "",
-          login: "admin",
-          senhaHash: await sha256("admin123"),
-          perfil: "Administrador",
-          createdAtMs: Date.now()
-        });
-      }
+      try{
+        const usersSnap = await withTimeout(getDocs(USERS_COL), 12000, "usuários");
+        if(usersSnap.empty){
+          await withTimeout(addDoc(USERS_COL, {
+            nome: "Administrador",
+            rg: "",
+            login: "admin",
+            senhaHash: await sha256("admin123"),
+            perfil: "Administrador",
+            createdAtMs: Date.now()
+          }), 12000, "usuário administrador inicial");
+        }
 
-      const atualizados = await getDocs(USERS_COL);
-      state.users = atualizados.docs.map(d => ({ id: d.id, ...d.data() }));
+        const atualizados = await withTimeout(getDocs(USERS_COL), 12000, "usuários atualizados");
+        state.users = atualizados.docs.map(d => ({ id: d.id, ...d.data() }));
+      } catch(err){
+        console.warn("Falha ao carregar cv_users:", err);
+        throw err;
+      }
     }
 
     function restoreSession(){
@@ -2988,8 +3016,21 @@ function listenRealtime(){
       setupPWA();
       switchView("painel");
       renderCursosTemp();
-      await ensureInitialData();
-      listenRealtime();
+
+      try{
+        await ensureInitialData();
+      } catch(err){
+        console.error("Falha na carga inicial:", err);
+        showRecoveryMode("Não foi possível conectar ao Firestore agora. O sistema abriu em modo de recuperação.");
+        return;
+      }
+
+      try{
+        listenRealtime();
+      } catch(err){
+        console.error("Falha ao ativar tempo real:", err);
+      }
+
       state.loading = false;
       renderAll();
     }
@@ -3000,7 +3041,7 @@ function listenRealtime(){
       $("loadingScreen").innerHTML = `
         <div class="card p-8 text-center max-w-xl w-full">
           <div class="text-2xl font-black danger">Erro ao iniciar o sistema</div>
-          <div class="muted mt-2">Confira o firebaseConfig e as regras do Firestore.</div>
+          <div class="muted mt-2">Confira o firebaseConfig, as regras do Firestore e se as coleções novas estão liberadas.</div>
           <pre class="mt-4 text-left text-xs bg-slate-100 p-4 rounded-2xl overflow-auto">${String(err)}</pre>
         </div>
       `;
